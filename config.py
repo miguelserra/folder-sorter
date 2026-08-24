@@ -8,9 +8,6 @@ importam as definições daqui — só precisas de editar ESTE ficheiro.
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
-load_dotenv()  # carrega o .env da raiz do projeto, se existir
-
 # ---------------------------------------------------------------------------
 # CAMINHOS PRINCIPAIS
 # ---------------------------------------------------------------------------
