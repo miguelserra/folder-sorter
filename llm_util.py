@@ -1,7 +1,8 @@
 """Wrapper do LLM via OpenRouter (modelo stealth/ox-alpha).
 
-Substitui o antigo gemini_util.py (SDK google-genai).
-Interface mantida: pedir_json(prompt) -> str limpo, pronto para json.loads().
+Substitui o antigo gemini_util.py. Interface mantida:
+  - pedir_json(prompt) -> str limpo, pronto para json.loads()
+  - LimiteDiarioAtingido (exceção, agora = TimeoutError)
 """
 
 import re
@@ -20,7 +21,6 @@ def _get_client() -> OpenAI:
         _client = OpenAI(
             base_url=BASE_URL,
             api_key=API_KEY,
-            # Cabeçalhos opcionais: identificam a app no dashboard do OpenRouter
             default_headers={
                 "HTTP-Referer": "https://github.com/miguelserra/folder-sorter",
                 "X-Title": "folder-sorter",
@@ -30,11 +30,7 @@ def _get_client() -> OpenAI:
 
 
 def strip_fences(texto: str) -> str:
-    """Remove fences markdown ```json ... ``` de forma tolerante.
-
-    Ao contrário da regex antiga, apanha ```JSON maiúsculo, indentações
-    e prosa antes/depois do bloco.
-    """
+    """Remove fences markdown ```json ... ``` (tolerante a maiúsculas/prosa)."""
     m = re.search(r"```(?:json|JSON)?\s*\n(.*?)\n?\s*```\s*$", texto.strip(), re.DOTALL)
     return m.group(1).strip() if m else texto.strip()
 
@@ -43,8 +39,8 @@ def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
     """Envia o prompt e devolve o texto limpo (sem fences).
 
     Levanta:
-      - TimeoutError  -> limite diário/quota esgotada (caller deve abortar)
-      - RuntimeError  -> erro permanente ou tentativas esgotadas
+      TimeoutError -> limite diário/quota esgotada (caller aborta)
+      RuntimeError -> erro permanente ou tentativas esgotadas
     """
     cliente = _get_client()
     espera = 2.0
@@ -54,11 +50,10 @@ def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
             r = cliente.chat.completions.create(
                 model=MODELO,
                 messages=[{"role": "user", "content": prompt}],
-                # Aceito pelo ox-alpha, mas SEM enforcement de schema —
-                # o strip_faces + try/except nos callers continua a ser a rede de segurança.
                 response_format={"type": "json_object"},
-                # Crítico no ox-alpha: default é "max", que torna cada pedido muito lento.
-                reasoning={"effort": REASONING_EFFORT},
+                # Parâmetros específicos do OpenRouter vão em extra_body:
+                # ox-alpha tem reasoning sempre ligado; default "max" é muito lento.
+                extra_body={"reasoning": {"effort": REASONING_EFFORT}},
             )
             conteudo = r.choices[0].message.content or ""
             if not conteudo.strip():
@@ -67,7 +62,6 @@ def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
 
         except RateLimitError as e:
             msg = str(e).lower()
-            # No OpenRouter, 429 diário traz algo como "free-models-per-day"
             if "per-day" in msg or "daily" in msg:
                 raise TimeoutError(f"Limite diário atingido: {e}") from e
             if tentativa == max_tentativas:
@@ -98,3 +92,7 @@ def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
             espera *= 2
 
     raise RuntimeError("pedir_json: esgotaram-se as tentativas")
+
+
+# Compatibilidade: os scripts originais importavam esta exceção do gemini_util
+LimiteDiarioAtingido = TimeoutError
