@@ -7,11 +7,13 @@ Corrige também o import antigo ('from config_gemini import ...') que crashava.
 import sys
 from pathlib import Path
 
-from extrair_metadados import (
-    carregar_catalogo,
-    guardar_catalogo,
-    processar_lote,
-    recolher_pendentes,
+from gemini_util import chamar_gemini_json
+
+from config import (
+    ORIGEM_NOVA, PASTA_DESTINO, CATALOGO_PATH, INDICE_HASHES_PATH,
+    API_KEY_GEMINI, MODELO_GEMINI, DRY_RUN, TAMANHO_LOTE,
+    PROFUNDIDADE_TAXONOMIA, LINGUAS_KEYWORDS, TAGS_FUNCAO,
+    MAX_TAGS_POR_FICHEIRO, EXTENSOES_SUPORTADAS,
 )
 from config import FICHEIRO_CATALOGO, MAX_DOCS_POR_LOTE
 
