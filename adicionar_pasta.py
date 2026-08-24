@@ -24,7 +24,7 @@ from google.genai import types
 
 from gemini_util import chamar_gemini_json
 
-from config_gemini import (
+from config import (
     ORIGEM_NOVA, PASTA_DESTINO, CATALOGO_PATH, INDICE_HASHES_PATH,
     API_KEY_GEMINI, MODELO_GEMINI, DRY_RUN, TAMANHO_LOTE,
     PROFUNDIDADE_TAXONOMIA, LINGUAS_KEYWORDS, TAGS_FUNCAO,
