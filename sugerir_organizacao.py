@@ -28,7 +28,7 @@ from config import (
     TAMANHO_LOTE, DRY_RUN,
 )
 
-TAMANHO_AMOSTRA_TAXONOMIA = 80  # nº de documentos usados para propor a taxonomia
+TAMANHO_AMOSTRA_TAXONOMIA = 80*4  # nº de documentos usados para propor a taxonomia
 
 # ---------------------------------------------------------------------------
 # CATÁLOGO — util
@@ -52,21 +52,23 @@ TOOLBOXES: quando tens um problema concreto em projeto (verificar punçoamento n
 dimensionar uma viga mista, calcular ações de vento, projetar estacas), abres UMA pasta
 e encontras lá tudo o que precisas para o resolver: guia prático, exemplo resolvido e teoria.
 
-Princípios:
+A estrutura atual já procura esta filosofia, em torno das separações nos eurocodigos, mas ao modo que
+a estrutura foi crescendo e aborvendo novas pastas, perdeu-se a organização e talvez a sua adequação.
+Deves procurar manter a estruta atual dentro do razoavel, mas eliminando redundancias e 
+rorganizando à luz de boas práticas que te pareçam fazer sentido.
+
+Algumas sugestões:
 1. Organiza por PROBLEMA/MATERIAL de projeto (o que vais calcular), nunca por tipo
    de documento ou formato.
 2. DESIGN GUIDES técnicos (SCI, Concrete Centre, Sétra, fib, CIRIA, manuais de
    fabricantes) pertencem à pasta do tópico/material a que se aplicam — NÃO cries
    pastas genéricas de "Guides".
-3. As NORMAS em si (EN, BS, NP, Anexos Nacionais, PDs) agrupam-se por norma num ramo
-   de referência próprio (ex.: Standards/Eurocode_2), porque se consultam como conjunto
-   com os respetivos anexos nacionais.
+3. As NORMAS e os design guides associados devem ficar associados
 4. Documentos NÃO TÉCNICOS (faturas, propostas de honorários, certificados de formação,
    cartas, CVs, portefólios, ficheiros temporários ou vazios) vão TODOS para um único
    ramo "_Admin", para nunca poluirem as pastas técnicas.
-5. Máximo 2 níveis, máx. ~25 pastas de topo, nomes EM INGLÊS sem espaços (underscore).
-   Exemplos do estilo esperado: Concrete/Slabs_and_Punching, Actions/Wind,
-   Bridges/Composite_Bridges, Foundations/Piled_Foundations, Software/SOFiSTiK.
+5. Máximo 5 níveis, máx. 40 pastas de topo, nomes EM INGLÊS sem espaços (underscore).
+
 
 Responde APENAS em JSON:
 {
@@ -79,8 +81,29 @@ def amostrar_catalogo(catalogo: dict, n: int = TAMANHO_AMOSTRA_TAXONOMIA) -> lis
     itens = list(catalogo.items())
     if len(itens) <= n:
         return itens
-    passo = len(itens) // n
-    return itens[::passo][:n]
+
+    # estratificado: garante que nenhuma pasta de origem fica sem representação
+    por_pasta: dict[str, list] = {}
+    for chave, dados in itens:
+        por_pasta.setdefault(dados.get("pasta_origem_atual", "?"), []).append((chave, dados))
+
+    por_grupo = max(2, n // max(1, len(por_pasta)))
+    amostra, vistas = [], set()
+    for pasta in sorted(por_pasta):
+        grupo = por_pasta[pasta]
+        passo = max(1, len(grupo) // por_grupo)
+        for chave, dados in grupo[::passo][:por_grupo]:
+            if chave not in vistas:
+                vistas.add(chave)
+                amostra.append((chave, dados))
+
+    for chave, dados in itens:          # completa até n com o que ficou de fora
+        if len(amostra) >= n:
+            break
+        if chave not in vistas:
+            vistas.add(chave)
+            amostra.append((chave, dados))
+    return amostra[:n]
 
 def gerar_taxonomia_proposta():
     catalogo = carregar_catalogo()
@@ -129,36 +152,67 @@ Responde APENAS com uma lista JSON, um objeto por documento, na MESMA ORDEM:
 ]
 """
 
+def achatar_termos(t) -> list:
+    """Normaliza o valor de keywords de uma língua para lista plana de strings."""
+    if isinstance(t, str):
+        return [t] if t.strip() else []
+    if isinstance(t, list):
+        termos = []
+        for item in t:
+            termos.extend(achatar_termos(item))
+        return [x.strip() for x in termos if isinstance(x, str) and x.strip()]
+    return []
+
 def gerar_plano():
     catalogo = carregar_catalogo()
     with open(TAXONOMIA_PROPOSTA_PATH, "r", encoding="utf-8") as f:
         taxonomia = json.load(f)["pastas"]
 
-    itens = list(catalogo.items())
-    plano = {}
+    # RETOMA: carrega o plano parcial, se existir
+    if PLANO_PATH.exists():
+        with open(PLANO_PATH, "r", encoding="utf-8") as f:
+            plano = json.load(f)
+        print(f"A retomar: {len(plano)} documento(s) já classificados no plano.")
+    else:
+        plano = {}
 
-    for i in range(0, len(itens), TAMANHO_LOTE):
-        lote = itens[i:i + TAMANHO_LOTE]
+    # só processa o que ainda não está no plano
+    pendentes = [(c, d) for c, d in catalogo.items() if c not in plano]
+    print(f"Documentos a classificar: {len(pendentes)} "
+          f"({len(catalogo) - len(pendentes)} já feitos)\n")
+
+    total_lotes = (len(pendentes) + TAMANHO_LOTE - 1) // TAMANHO_LOTE
+    for i in range(0, len(pendentes), TAMANHO_LOTE):
+        lote = pendentes[i:i + TAMANHO_LOTE]
+        n_lote = i // TAMANHO_LOTE + 1
         prompt = construir_prompt_plano(taxonomia)
+
         for chave, dados in lote:
             kw = dados.get("keywords", {})
-            kw_texto = "; ".join(f"{l}: {', '.join(t)}" for l, t in kw.items())
+            partes = []
+            for l, t in kw.items():
+                termos = achatar_termos(t)
+                if termos:
+                    partes.append(f"{l}: {', '.join(termos)}")
+            kw_texto = "; ".join(partes)
+
             prompt += (f"\n\n--- chave: {chave} ---\n"
                        f"Título: {dados.get('titulo')}\n"
                        f"Resumo: {dados.get('resumo')}\n"
                        f"Keywords: {kw_texto}")
 
-        print(f"A propor destino para lote {i // TAMANHO_LOTE + 1} ({len(lote)} documentos)...")
-        bruto = pedir_json(prompt)  # MIGRAÇÃO
+        print(f"Lote {n_lote}/{total_lotes} ({len(lote)} documentos)...", end=" ", flush=True)
+        bruto = pedir_json(prompt)
         try:
             propostas = json.loads(bruto)
         except json.JSONDecodeError:
-            print("⚠️ Falha a interpretar lote — documentos ficam sem proposta.")
-            print("--- Resposta em bruto (para diagnóstico) ---")
-            print(bruto[:1000])
-            print("--- fim da resposta em bruto ---")
+            print("⚠️ JSON inválido — lote fica para a próxima corrida.")
             continue
 
+        if isinstance(propostas, dict):   # defesa extra contra desvios do modelo
+            propostas = next((v for v in propostas.values() if isinstance(v, list)), [])
+
+        n_ok = 0
         for proposta in propostas:
             chave = proposta.get("chave")
             if chave in catalogo:
@@ -167,11 +221,16 @@ def gerar_plano():
                     "caminho_destino_pasta": proposta.get("caminho_destino", "Outros"),
                     "justificacao": proposta.get("justificacao", ""),
                 }
+                n_ok += 1
 
-    with open(PLANO_PATH, "w", encoding="utf-8") as f:
-        json.dump(plano, f, ensure_ascii=False, indent=2)
+        # CHECKPOINT: grava após CADA lote bem-sucedido
+        with open(PLANO_PATH, "w", encoding="utf-8") as f:
+            json.dump(plano, f, ensure_ascii=False, indent=2)
+        print(f"✓ {n_ok} classificados (total: {len(plano)})")
 
-    print(f"\nPlano gerado com {len(plano)} entradas em {PLANO_PATH}")
+    print(f"\nPlano com {len(plano)}/{len(catalogo)} entradas em {PLANO_PATH}")
+    if len(plano) < len(catalogo):
+        print("⚠️ Há documentos por classificar — corre outra vez para retomar.")
     print("Revê o ficheiro à vontade. Quando estiveres confiante, muda DRY_RUN = False")
     print("em config.py e corre este script outra vez para mover a sério.")
 

@@ -51,10 +51,20 @@ def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
                 model=MODELO,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                # Parâmetros específicos do OpenRouter vão em extra_body:
-                # ox-alpha tem reasoning sempre ligado; default "max" é muito lento.
                 extra_body={"reasoning": {"effort": REASONING_EFFORT}},
             )
+
+            # OpenRouter pode devolver 200 com corpo de erro -> choices=None
+            if not r.choices:
+                erro = getattr(r, "error", None) or (r.model_extra or {}).get("error")
+                msg = str(erro)[:300] if erro else "resposta sem choices nem erro explícito"
+                print(f"[resposta inválida do provider] {msg}")
+                if tentativa == max_tentativas:
+                    raise RuntimeError(f"provider falhou repetidamente: {msg}")
+                time.sleep(espera)
+                espera *= 2
+                continue
+
             conteudo = r.choices[0].message.content or ""
             if not conteudo.strip():
                 raise ValueError("resposta vazia do modelo")

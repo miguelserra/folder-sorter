@@ -49,7 +49,7 @@ MODELO_GEMINI = MODELO
 # COMPORTAMENTO / SEGURANÇA
 # ---------------------------------------------------------------------------
 
-DRY_RUN = True              # True = simula tudo; nada é movido/renomeado no disco
+DRY_RUN = False              # True = simula tudo; nada é movido/renomeado no disco
 PAUSAR_PARA_REVISAO = True  # True = correr_tudo.py para depois de gerar a taxonomia e o
                             # plano, para reveres antes de continuar. Só desliga isto
                             # quando já confiares no processo (ex: fusões repetidas).
