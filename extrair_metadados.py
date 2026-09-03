@@ -3,15 +3,20 @@ extrair_metadados.py
 ======================
 PASSO 1 do pipeline de biblioteca.
 
-Lê todos os PDFs, Word (.docx) e PowerPoint (.pptx) de PASTA_ORIGEM (recursivo,
-config.py) e cria/atualiza um catálogo central `catalogo.json` com, por
-documento: titulo, autor, resumo, tag_funcao e keywords multilingue.
+Lê todos os documentos de PASTA_ORIGEM (recursivo, config.py) e cria/atualiza
+um catálogo central `catalogo.json` com, por documento: titulo, autor, resumo,
+tag_funcao e keywords multilingue.
+
+Dois grupos de ficheiros (config.py):
+ - EXTENSOES_SUPORTADAS: texto extraído localmente (pdf, docx, pptx, xlsx, txt...)
+ - EXTENSOES_NOME_APENAS: sem texto extraível (rvt, dwg, jpg...) — classificados
+   pelo nome do ficheiro + pasta de origem
 
 É RESUMÍVEL: ficheiros já indexados (mesmo hash) são ignorados. Corre outra
 vez sempre que adicionares livros novos a PASTA_ORIGEM.
 
 Instalação:
- pip install openai python-docx python-pptx pypdf python-dotenv
+ pip install openai python-docx python-pptx pypdf openpyxl
 """
 
 import hashlib
@@ -25,7 +30,7 @@ from llm_util import pedir_json
 from config import (
     PASTA_ORIGEM, CATALOGO_PATH,
     LINGUAS_KEYWORDS, TAGS_FUNCAO, PAGINAS_PDF, TAMANHO_LOTE,
-    EXTENSOES_SUPORTADAS,
+    EXTENSOES_TODAS,
 )
 
 # ---------------------------------------------------------------------------
@@ -38,6 +43,32 @@ def hash_ficheiro(caminho: Path, bloco: int = 8192) -> str:
         while chunk := f.read(bloco):
             h.update(chunk)
     return h.hexdigest()
+
+# ---------------------------------------------------------------------------
+# NORMALIZAÇÃO DE KEYWORDS (defesa contra desvios do modelo)
+# ---------------------------------------------------------------------------
+
+def achatar_termos(t) -> list:
+    """Normaliza o valor de keywords de uma língua para lista plana de strings.
+    Apanha listas aninhadas, strings soltas e lixo — o catálogo nunca guarda malformado."""
+    if isinstance(t, str):
+        return [t.strip()] if t.strip() else []
+    if isinstance(t, list):
+        termos = []
+        for item in t:
+            termos.extend(achatar_termos(item))
+        return termos
+    return []
+
+def keywords_validas(kw_raw) -> dict:
+    """Garante o formato {lingua: [strings]} a partir do que o modelo devolver."""
+    if not isinstance(kw_raw, dict):
+        plano = achatar_termos(kw_raw)
+        return {"pt": plano} if plano else {l: [] for l in LINGUAS_KEYWORDS}
+    resultado = {}
+    for l, t in kw_raw.items():
+        resultado[str(l)] = achatar_termos(t)
+    return resultado
 
 # ---------------------------------------------------------------------------
 # EXTRAÇÃO DE TEXTO POR TIPO DE FICHEIRO
@@ -72,10 +103,26 @@ def extrair_texto_pptx(caminho: Path) -> str:
                 partes.append(shape.text_frame.text)
     return "\n".join(partes)
 
+def extrair_texto_xlsx(caminho: Path) -> str:
+    from openpyxl import load_workbook
+    try:
+        wb = load_workbook(caminho, read_only=True, data_only=True)
+    except Exception:
+        return ""
+    partes = []
+    for ws in wb.worksheets[:3]:                      # primeiras 3 folhas chegam
+        for row in ws.iter_rows(max_row=50, values_only=True):
+            linha = " ".join(str(c) for c in row if c is not None)
+            if linha.strip():
+                partes.append(linha)
+    return "\n".join(partes)[:4000]
+
 def extrair_texto(caminho: Path) -> str:
     """Nunca deixa uma exceção sair daqui — um ficheiro problemático (corrompido,
     ou com extensão errada, ex: .doc antigo renomeado para .docx) fica só com
-    texto vazio e regista um aviso, em vez de parar o pipeline inteiro."""
+    texto vazio e regista um aviso, em vez de parar o pipeline inteiro.
+    Ficheiros sem extrator (CAD/BIM, imagens) devolvem "" por desenho — são
+    classificados pelo nome + pasta de origem."""
     ext = caminho.suffix.lower()
     try:
         if ext == ".pdf":
@@ -84,6 +131,10 @@ def extrair_texto(caminho: Path) -> str:
             return extrair_texto_docx(caminho)
         if ext == ".pptx":
             return extrair_texto_pptx(caminho)
+        if ext == ".xlsx":
+            return extrair_texto_xlsx(caminho)
+        if ext in {".txt", ".md", ".rtf"}:
+            return caminho.read_text(encoding="utf-8", errors="ignore")[:4000]
     except Exception as e:
         print(f"⚠️ Não consegui ler o conteúdo de '{caminho.name}' ({type(e).__name__}: {e}). "
               f"Verifica se o ficheiro não está corrompido ou com a extensão errada "
@@ -135,6 +186,10 @@ usa a pasta de origem como pista mas confirma com o conteúdo (ex: um ficheiro
 na pasta "D-WEBINARS" é provavelmente "Webinar"; um na pasta "B-EXAMPLES" é
 provavelmente "Exemplo"; um livro técnico normal é "Livro/Manual").
 
+Para documentos SEM excerto de texto (ficheiros CAD/BIM como .rvt/.dwg, ou
+imagens), classifica pelo nome do ficheiro e pasta de origem; se o nome não
+for informativo (ex: IMG_2047.jpg), usa tag_funcao "Outro" e keywords genéricas.
+
 Cada lista de keywords deve ter entre 5 a 10 termos técnicos relevantes,
 traduzidos/equivalentes nas línguas: {linguas_str}. Não incluas texto fora do JSON.
 """
@@ -148,9 +203,15 @@ def classificar_lote(documentos: list) -> list:
 
     bruto = pedir_json(prompt)  # MIGRAÇÃO: já devolve texto limpo, sem fences
     try:
-        return json.loads(bruto)
-    except json.JSONDecodeError:
-        print("⚠️ Falha a interpretar resposta do modelo neste lote — a saltar.")
+        parsed = json.loads(bruto)
+        # NemoTron às vezes devolve objeto único ou string em vez de lista
+        if isinstance(parsed, dict):
+            parsed = [parsed]
+        if not isinstance(parsed, list) or not all(isinstance(x, dict) for x in parsed):
+            raise ValueError(f"JSON não é lista de objetos: {type(parsed).__name__}")
+        return parsed
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"⚠️ Falha a interpretar resposta do modelo neste lote ({e}) — a saltar.")
         print("--- Resposta em bruto (para diagnóstico) ---")
         print(bruto[:1000])
         print("--- fim da resposta em bruto ---")
@@ -166,7 +227,7 @@ def main():
     catalogo = carregar_catalogo()
     hashes_existentes = {v["hash"] for v in catalogo.values()}
 
-    todos = [f for f in PASTA_ORIGEM.rglob("*") if f.suffix.lower() in EXTENSOES_SUPORTADAS]
+    todos = [f for f in PASTA_ORIGEM.rglob("*") if f.suffix.lower() in EXTENSOES_TODAS]
     print(f"Encontrados {len(todos)} documentos em {PASTA_ORIGEM}.")
 
     por_indexar = []
@@ -189,8 +250,16 @@ def main():
             documentos_com_texto.append((caminho, texto, pasta_origem))
 
         metadados_lote = classificar_lote(documentos_com_texto)
+        # NemoTron e outros nem sempre devolvem lista de dicts -> normalizar
+        if isinstance(metadados_lote, dict):
+            metadados_lote = [metadados_lote]
+        if not isinstance(metadados_lote, list):
+            metadados_lote = list(metadados_lote) if isinstance(metadados_lote, (tuple, set)) else []
 
         for (caminho, h), metadados in zip(lote, metadados_lote):
+            if not isinstance(metadados, dict):
+                print(f"⚠️ Metadados inválidos para '{caminho.name}' ({type(metadados).__name__}: {str(metadados)[:200]}). A usar defaults.")
+                metadados = {}
             chave = str(caminho.relative_to(PASTA_ORIGEM))
             catalogo[chave] = {
                 "caminho": str(caminho),
@@ -201,7 +270,7 @@ def main():
                 "autor": metadados.get("autor", "desconhecido"),
                 "resumo": metadados.get("resumo", ""),
                 "tag_funcao": metadados.get("tag_funcao", "Outro"),
-                "keywords": metadados.get("keywords", {}),
+                "keywords": keywords_validas(metadados.get("keywords", {})),  # nunca guarda malformado
                 "data_indexado": datetime.now().isoformat(timespec="seconds"),
             }
 

@@ -35,8 +35,11 @@ def strip_fences(texto: str) -> str:
     return m.group(1).strip() if m else texto.strip()
 
 
-def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
+def pedir_json(prompt: str, max_tentativas: int = 5, effort: str | None = None) -> str:
     """Envia o prompt e devolve o texto limpo (sem fences).
+
+    effort: sobrepõe temporariamente o REASONING_EFFORT do config
+            (ex.: effort="high" para a geração da taxonomia).
 
     Levanta:
       TimeoutError -> limite diário/quota esgotada (caller aborta)
@@ -46,13 +49,20 @@ def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
     espera = 2.0
 
     for tentativa in range(1, max_tentativas + 1):
+        # Só stealth/openai suportam bem json_object + reasoning; z-ai/nvidia/liquid partem com isso
+        suporta_json = MODELO.lower().startswith(("stealth/", "openai/", "google/", "anthropic/"))
+        suporta_reasoning = "stealth" in MODELO.lower() or "nemotron" in MODELO.lower()
+        kwargs = {
+            "model": MODELO,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        if suporta_json:
+            kwargs["response_format"] = {"type": "json_object"}
+        if suporta_reasoning and (effort or REASONING_EFFORT):
+            kwargs["extra_body"] = {"reasoning": {"effort": effort or REASONING_EFFORT}}
+
         try:
-            r = cliente.chat.completions.create(
-                model=MODELO,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                extra_body={"reasoning": {"effort": REASONING_EFFORT}},
-            )
+            r = cliente.chat.completions.create(**kwargs)
 
             # OpenRouter pode devolver 200 com corpo de erro -> choices=None
             if not r.choices:
@@ -71,6 +81,7 @@ def pedir_json(prompt: str, max_tentativas: int = 5) -> str:
             return strip_fences(conteudo)
 
         except RateLimitError as e:
+            # ... resto do tratamento de erros igual ao que já tens
             msg = str(e).lower()
             if "per-day" in msg or "daily" in msg:
                 raise TimeoutError(f"Limite diário atingido: {e}") from e
